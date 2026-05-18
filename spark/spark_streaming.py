@@ -20,9 +20,9 @@ df = spark.readStream \
     .option("startingOffsets", "latest") \
     .load()
 
-weather_df = df.selectExpr("CAST(value AS STRING)") \
+weather_df = df.selectExpr("CAST(value AS STRING)")
 
-query = weather_df.writestream \
+query = weather_df.writeStream \
     .outputMode("append") \
     .format("console") \
     .start()
