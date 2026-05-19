@@ -1,25 +1,38 @@
 import json
 import requests
 from kafka import KafkaProducer
-
-producer = KafkaProducer(
-    bootstrap_servers='kafka:9092',
-    value_serializer=lambda v: json.dumps(v).encode('utf-8')
-)
+from kafka.errors import NoBrokersAvailable
+import time
 
 url = (
     "https://api.open-meteo.com/v1/forecast?"
     "latitude=52.52&longitude=13.41"
-    "&hourly=temperature_2m,relative_humidity_2m,"
-    "pressure_msl"
+    "&hourly=temperature_2m"
 )
 
-response = requests.get(url)
+for i in range(10):
 
-data = response.json()
+    try:
 
-producer.send("weather-events", data)
+        producer = KafkaProducer(
+            bootstrap_servers='kafka:9092',
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
 
-producer.flush()
+        response = requests.get(url)
 
-print("Weather event sent to Kafka")
+        data = response.json()
+
+        producer.send("weather-events", data)
+
+        producer.flush()
+
+        print("Weather event sent successfully")
+
+        break
+
+    except NoBrokersAvailable:
+
+        print("Kafka not ready yet... retrying")
+
+        time.sleep(5)
