@@ -1,25 +1,24 @@
 services:
 
+  # -----------------------------------
+  # ZOOKEEPER
+  # -----------------------------------
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
-    restart: unless-stopped
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    ports:
+      - "2181:2181"
 
+  # -----------------------------------
+  # KAFKA
+  # -----------------------------------
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: kafka
-    restart: unless-stopped
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper
     ports:
       - "9092:9092"
     environment:
@@ -27,17 +26,13 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
 
+  # -----------------------------------
+  # POSTGRES
+  # -----------------------------------
   postgres:
     image: postgres:13
     container_name: postgres
-    restart: unless-stopped
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -45,121 +40,114 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - postgres-db-volume:/var/lib/postgresql/data
 
+  # -----------------------------------
+  # AIRFLOW
+  # -----------------------------------
   airflow:
     image: apache/airflow:2.8.1
     container_name: airflow
-    restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
+      - postgres
+      - kafka
     ports:
       - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./kafka:/opt/airflow/kafka
-      - airflow_logs:/opt/airflow/logs
-    environment:
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__WEBSERVER__SECRET_KEY: "change_me_in_production"
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
-    command: standalone
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
-  spark:
-    image: apache/spark:3.5.5
-    container_name: spark
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-    volumes:
-      - ./spark:/opt/spark-apps
-    environment:
-      SPARK_MODE: master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
-
-  streamlit:
-    image: python:3.9-slim
-    container_name: streamlit
-    restart: unless-stopped
-    working_dir: /app
-    volumes:
-      - ./dashboard:/app
+      - ./requirements.txt:/requirements.txt
     command: >
       bash -c "
-        pip install --no-cache-dir -r requirements.txt &&
-        streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+      pip install -r /requirements.txt &&
+      airflow db init &&
+      airflow users create \
+        --username airflow \
+        --password airflow \
+        --firstname Airflow \
+        --lastname Admin \
+        --role Admin \
+        --email airflow@example.com || true &&
+      airflow standalone
+      "
+
+  # -----------------------------------
+  # KAFKA CONSUMER
+  # -----------------------------------
+  consumer:
+    image: python:3.9
+    container_name: consumer
+    working_dir: /app
+    depends_on:
+      - kafka
+      - postgres
+    volumes:
+      - ./kafka:/app
+      - ./requirements.txt:/app/requirements.txt
+    command: >
+      bash -c "
+      pip install -r requirements.txt &&
+      python consumer.py
+      "
+
+  # -----------------------------------
+  # STREAMLIT DASHBOARD
+  # -----------------------------------
+  streamlit:
+    image: python:3.9
+    container_name: streamlit
+    working_dir: /app
+    depends_on:
+      - postgres
+    volumes:
+      - ./dashboard:/app
+      - ./requirements.txt:/app/requirements.txt
+    command: >
+      bash -c "
+      pip install -r requirements.txt &&
+      streamlit run app.py --server.port 8501 --server.address 0.0.0.0
       "
     ports:
       - "8501:8501"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8501/_stcore/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
 
+  # -----------------------------------
+  # PROMETHEUS
+  # -----------------------------------
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  # -----------------------------------
+  # KAFKA EXPORTER
+  # -----------------------------------
   kafka-exporter:
-    image: danielqsj/kafka-exporter:latest
+    image: danielqsj/kafka-exporter
     container_name: kafka-exporter
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
     ports:
       - "9308:9308"
     command:
-      - "--kafka.server=kafka:9092"
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    restart: unless-stopped
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.enable-lifecycle"
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    restart: unless-stopped
+      - '--kafka.server=kafka:9092'
     depends_on:
-      - prometheus
+      - kafka
+
+  # -----------------------------------
+  # GRAFANA
+  # -----------------------------------
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
     ports:
       - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
 
 volumes:
-  postgres_data:
-  airflow_logs:
-  prometheus_data:
-  grafana_data:
+  postgres-db-volume:
