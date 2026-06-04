@@ -10,7 +10,8 @@ schema = StructType([
     StructField("time", StringType()),
     StructField("temperature_2m", DoubleType()),
     StructField("relative_humidity_2m", DoubleType()),
-    StructField("pressure_msl", DoubleType())
+    StructField("pressure_msl", DoubleType()),
+    StructField("rainfall", DoubleType())
 ])
 
 df = spark.readStream \
